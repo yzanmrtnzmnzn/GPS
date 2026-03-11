@@ -4,30 +4,20 @@ import queue
 import threading
 import serial
 
-# -------------------------
-# CONFIGURACIÓN PUERTO SERIE
-# -------------------------
+
 PORT = "COM3"
 BAUDRATE = 4800
 TIMEOUT_S = 1
 
-# -------------------------
-# CONSTANTES WGS84
-# -------------------------
+
 A_WGS84 = 6378137.0
 E2_WGS84 = 0.00669437999013
 K0 = 0.9996
 
 
-# -------------------------
-# 1) Parsear GGA -> lat/lon
-# -------------------------
+
 def nmea_dm_to_deg(dm: str, hemi: str, is_lat: bool) -> float:
-    """
-    Convierte coordenadas NMEA:
-    - latitud:  ddmm.mmmm
-    - longitud: dddmm.mmmm
-    """
+ 
     if is_lat:
         deg = int(dm[0:2])
         minutes = float(dm[2:])
@@ -44,11 +34,7 @@ def nmea_dm_to_deg(dm: str, hemi: str, is_lat: bool) -> float:
 
 
 def parse_gga(line: str):
-    """
-    Devuelve:
-    (lat_deg, lon_deg, fix_quality, num_sats, altitude_m)
-    o None si la línea no es válida.
-    """
+
     if not (line.startswith("$GPGGA") or line.startswith("$GNGGA")):
         return None
 
@@ -88,18 +74,13 @@ def parse_gga(line: str):
     return lat, lon, fq, ns, alt
 
 
-# -------------------------
-# 2) Conversión a UTM
-# -------------------------
+
 def utm_zone_from_lon(lon_deg: float) -> int:
     return int((lon_deg + 180.0) / 6.0) + 1
 
 
 def latlon_to_utm_wgs84(lat_deg: float, lon_deg: float, force_zone=None):
-    """
-    Conversión a UTM usando WGS84.
-    Devuelve: (Easting, Northing, zone, hemisphere)
-    """
+  
     a = A_WGS84
     e2 = E2_WGS84
     k0 = K0
@@ -124,7 +105,7 @@ def latlon_to_utm_wgs84(lat_deg: float, lon_deg: float, force_zone=None):
     C = ep2 * cos_lat * cos_lat
     A = cos_lat * (lon - lon0)
 
-    # Arco meridiano
+
     M = a * (
         (1 - e2 / 4 - 3 * e2**2 / 64 - 5 * e2**3 / 256) * lat
         - (3 * e2 / 8 + 3 * e2**2 / 32 + 45 * e2**3 / 1024) * math.sin(2 * lat)
@@ -132,14 +113,14 @@ def latlon_to_utm_wgs84(lat_deg: float, lon_deg: float, force_zone=None):
         - (35 * e2**3 / 3072) * math.sin(6 * lat)
     )
 
-    # Easting
+
     easting = k0 * N * (
         A
         + (1 - T + C) * A**3 / 6
         + (5 - 18 * T + T**2 + 72 * C - 58 * ep2) * A**5 / 120
     ) + 500000.0
 
-    # Northing
+
     northing = k0 * (
         M + N * tan_lat * (
             A**2 / 2
@@ -154,14 +135,9 @@ def latlon_to_utm_wgs84(lat_deg: float, lon_deg: float, force_zone=None):
     return easting, northing, zone, hemi
 
 
-# -------------------------
-# 3) Hilo lector GPS
-# -------------------------
+
 def gps_reader(port, data_queue, stop_event):
-    """
-    Lee continuamente del GPS en un hilo separado
-    y mete las tramas válidas GGA en una cola.
-    """
+
     try:
         ser = serial.Serial(
             port=port,
@@ -198,9 +174,7 @@ def gps_reader(port, data_queue, stop_event):
         print("Puerto serie cerrado.")
 
 
-# -------------------------
-# 4) Programa principal
-# -------------------------
+
 def main():
     data_queue = queue.Queue()
     stop_event = threading.Event()
@@ -226,7 +200,7 @@ def main():
             print(f"UTM: E={E:.3f} m  N={N:.3f} m  Zona={zone}{hemi}")
             print("-" * 40)
 
-            # pequeña pausa para no cargar el hilo principal
+
             time.sleep(0.05)
 
     except KeyboardInterrupt:
