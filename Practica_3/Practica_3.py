@@ -22,11 +22,11 @@ E2_WGS84 = 0.00669437999013
 K0 = 0.9996
 
 WINDOW_TITLE = "Práctica 3 - Sistema de aviso al conductor (INSIA)"
-MAP_CANVAS_SIZE = (760, 760)
+MAP_CANVAS_SIZE = (620, 620)
 MAX_TRAIL_POINTS = 400
 
 # Si quieres probar sin GPS real, ponlo a True.
-USE_FAKE_GPS = False
+USE_FAKE_GPS = True
 
 # Distancia máxima para considerar que el coche está en la pista
 MAX_DISTANCE_TO_TRACK_M = 25.0
