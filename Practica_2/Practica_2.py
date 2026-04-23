@@ -2,11 +2,18 @@ import math
 import time
 import queue
 import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, List, Tuple
+
 import serial
 import tkinter as tk
 from PIL import Image, ImageTk
 
 
+# =========================================================
+# CONFIGURACIÓN GENERAL
+# =========================================================
 PORT = "COM3"
 BAUDRATE = 4800
 TIMEOUT_S = 1
@@ -15,39 +22,29 @@ A_WGS84 = 6378137.0
 E2_WGS84 = 0.00669437999013
 K0 = 0.9996
 
-
-# =========================================================
-# CONFIGURACIÓN DEL MAPA
-# =========================================================
-# Ruta de la imagen capturada de Google Earth
-MAP_IMAGE_PATH = "campus_sur.png"
-
-# Tamaño de la ventana/canvas
-WINDOW_WIDTH = 1000
-WINDOW_HEIGHT = 700
-
-# Número máximo de puntos de la trayectoria que se guardan en pantalla
+WINDOW_TITLE = "Práctica 2 - Mapa electrónico de la carretera"
 MAX_TRAIL_POINTS = 500
 
-# ---------------------------------------------------------
-# GEOREFERENCIACIÓN
-# ---------------------------------------------------------
-# Debes cambiar estos 3 puntos por los reales de TU imagen.
-#
-# Cada punto es:
-#   "pixel": (x_imagen, y_imagen)
-#   "utm":   (Easting, Northing)
-#
-# Los 3 puntos NO deben estar alineados.
-# Con esos 3 puntos se calcula una transformación afín:
-#   x_pixel = a*E + b*N + c
-#   y_pixel = d*E + e*N + f
-#
-# Ejemplo de estructura:
-CONTROL_POINTS = [
-    {"pixel": (900, 700), "utm": (446344.30, 4470862.04)},
-    {"pixel": (950, 300), "utm": (446602.80, 4471303.60)},
-    {"pixel": (1250, 280), "utm": (446945.44, 4471246.59)},
+BASE_DIR = Path(__file__).resolve().parent
+CAMPUS_MAP_IMAGE_PATH = BASE_DIR / "campus_sur_capture.png"
+INSIA_IMAGE_PATH = BASE_DIR / "imagen_practica2.jpeg"
+
+
+# =========================================================
+# PUNTOS DE CONTROL
+# =========================================================
+# CAMPUS SUR
+CAMPUS_CONTROL_POINTS = [
+    {"name": "P1", "pixel": (500, 692), "utm": (446344.30, 4470862.04)},
+    {"name": "P2", "pixel": (552, 236), "utm": (446602.80, 4471303.60)},
+    {"name": "P3", "pixel": (852, 162), "utm": (446945.44, 4471246.59)},
+]
+
+# INSIA
+INSIA_CONTROL_POINTS = [
+    {"name": "P1", "pixel": (798, 818), "utm": (446344.30, 4470862.04)},
+    {"name": "P2", "pixel": (1120, 240), "utm": (446602.80, 4471303.60)},
+    {"name": "P3", "pixel": (1340, 450), "utm": (446945.44, 4471246.59)},
 ]
 
 
@@ -62,12 +59,10 @@ def nmea_dm_to_deg(dm: str, hemi: str, is_lat: bool) -> float:
         deg = int(dm[0:3])
         minutes = float(dm[3:])
 
-    val = deg + minutes / 60.0
-
+    value = deg + minutes / 60.0
     if hemi in ("S", "W"):
-        val *= -1.0
-
-    return val
+        value *= -1.0
+    return value
 
 
 def parse_gga(line: str):
@@ -120,7 +115,6 @@ def latlon_to_utm_wgs84(lat_deg: float, lon_deg: float, force_zone=None):
     k0 = K0
 
     ep2 = e2 / (1.0 - e2)
-
     zone = force_zone if force_zone is not None else utm_zone_from_lon(lon_deg)
     hemi = "N" if lat_deg >= 0 else "S"
 
@@ -134,29 +128,29 @@ def latlon_to_utm_wgs84(lat_deg: float, lon_deg: float, force_zone=None):
     cos_lat = math.cos(lat)
     tan_lat = math.tan(lat)
 
-    N = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
-    T = tan_lat * tan_lat
-    C = ep2 * cos_lat * cos_lat
-    A = cos_lat * (lon - lon0)
+    n = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
+    t = tan_lat * tan_lat
+    c = ep2 * cos_lat * cos_lat
+    aa = cos_lat * (lon - lon0)
 
-    M = a * (
+    m = a * (
         (1 - e2 / 4 - 3 * e2**2 / 64 - 5 * e2**3 / 256) * lat
         - (3 * e2 / 8 + 3 * e2**2 / 32 + 45 * e2**3 / 1024) * math.sin(2 * lat)
         + (15 * e2**2 / 256 + 45 * e2**3 / 1024) * math.sin(4 * lat)
         - (35 * e2**3 / 3072) * math.sin(6 * lat)
     )
 
-    easting = k0 * N * (
-        A
-        + (1 - T + C) * A**3 / 6
-        + (5 - 18 * T + T**2 + 72 * C - 58 * ep2) * A**5 / 120
+    easting = k0 * n * (
+        aa
+        + (1 - t + c) * aa**3 / 6
+        + (5 - 18 * t + t**2 + 72 * c - 58 * ep2) * aa**5 / 120
     ) + 500000.0
 
     northing = k0 * (
-        M + N * tan_lat * (
-            A**2 / 2
-            + (5 - T + 9 * C + 4 * C**2) * A**4 / 24
-            + (61 - 58 * T + T**2 + 600 * C - 330 * ep2) * A**6 / 720
+        m + n * tan_lat * (
+            aa**2 / 2
+            + (5 - t + 9 * c + 4 * c**2) * aa**4 / 24
+            + (61 - 58 * t + t**2 + 600 * c - 330 * ep2) * aa**6 / 720
         )
     )
 
@@ -176,8 +170,8 @@ def gps_reader(port, data_queue, stop_event):
             stopbits=serial.STOPBITS_ONE,
             timeout=TIMEOUT_S,
         )
-    except serial.SerialException as e:
-        print(f"Error al abrir el puerto {port}: {e}")
+    except serial.SerialException as exc:
+        print(f"Error al abrir el puerto {port}: {exc}")
         return
 
     print(f"GPS conectado en {port}")
@@ -197,74 +191,201 @@ def gps_reader(port, data_queue, stop_event):
             gga = parse_gga(line)
             if gga is not None:
                 data_queue.put(gga)
-
     finally:
         ser.close()
         print("Puerto serie cerrado.")
 
 
 # =========================================================
-# TRANSFORMACIÓN UTM -> PIXEL
+# TRANSFORMACIÓN AFÍN UTM -> PIXEL
 # =========================================================
-def solve_3x3(A, b):
-    """
-    Resuelve un sistema 3x3 por eliminación de Gauss.
-    """
-    M = [A[0][:] + [b[0]], A[1][:] + [b[1]], A[2][:] + [b[2]]]
+def solve_3x3(a_matrix, b_vector):
+    matrix = [
+        a_matrix[0][:] + [b_vector[0]],
+        a_matrix[1][:] + [b_vector[1]],
+        a_matrix[2][:] + [b_vector[2]],
+    ]
 
     for i in range(3):
-        pivot = M[i][i]
+        pivot = matrix[i][i]
         if abs(pivot) < 1e-12:
             for j in range(i + 1, 3):
-                if abs(M[j][i]) > 1e-12:
-                    M[i], M[j] = M[j], M[i]
-                    pivot = M[i][i]
+                if abs(matrix[j][i]) > 1e-12:
+                    matrix[i], matrix[j] = matrix[j], matrix[i]
+                    pivot = matrix[i][i]
                     break
+
         if abs(pivot) < 1e-12:
             raise ValueError("No se puede resolver la georreferenciación: puntos mal elegidos.")
 
         for k in range(i, 4):
-            M[i][k] /= pivot
+            matrix[i][k] /= pivot
 
         for j in range(3):
             if j == i:
                 continue
-            factor = M[j][i]
+            factor = matrix[j][i]
             for k in range(i, 4):
-                M[j][k] -= factor * M[i][k]
+                matrix[j][k] -= factor * matrix[i][k]
 
-    return [M[0][3], M[1][3], M[2][3]]
+    return [matrix[0][3], matrix[1][3], matrix[2][3]]
 
 
 class AffineGeoReference:
-    """
-    Calcula:
-        x = a*E + b*N + c
-        y = d*E + e*N + f
-    a partir de 3 puntos de control.
-    """
     def __init__(self, control_points):
         if len(control_points) != 3:
             raise ValueError("Se necesitan exactamente 3 puntos de control.")
 
-        A = []
+        a_matrix = []
         bx = []
         by = []
 
-        for p in control_points:
-            E, N = p["utm"]
-            x, y = p["pixel"]
-            A.append([E, N, 1.0])
-            bx.append(x)
-            by.append(y)
+        for point in control_points:
+            easting, northing = point["utm"]
+            x_pixel, y_pixel = point["pixel"]
+            a_matrix.append([easting, northing, 1.0])
+            bx.append(x_pixel)
+            by.append(y_pixel)
 
-        self.a, self.b, self.c = solve_3x3(A, bx)
-        self.d, self.e, self.f = solve_3x3(A, by)
+        self.a, self.b, self.c = solve_3x3(a_matrix, bx)
+        self.d, self.e, self.f = solve_3x3(a_matrix, by)
 
-    def utm_to_pixel(self, E, N):
-        x = self.a * E + self.b * N + self.c
-        y = self.d * E + self.e * N + self.f
-        return x, y
+    def utm_to_pixel(self, easting, northing):
+        x_pixel = self.a * easting + self.b * northing + self.c
+        y_pixel = self.d * easting + self.e * northing + self.f
+        return x_pixel, y_pixel
+
+
+# =========================================================
+# ESTRUCTURAS DE MAPA
+# =========================================================
+@dataclass
+class MapConfig:
+    name: str
+    image_path: Path
+    control_points: Optional[List[dict]]
+    max_display_size: Tuple[int, int]
+    marker_color: str
+
+
+class MapPanel:
+    def __init__(self, parent, config: MapConfig, title_text: str):
+        self.config = config
+        self.title_text = title_text
+        self.trail_pixels = []
+
+        self.frame = tk.Frame(parent, padx=6, pady=6)
+        self.frame.pack(side="left", fill="both", expand=True)
+
+        self.title = tk.Label(self.frame, text=title_text, font=("Arial", 12, "bold"))
+        self.title.pack(anchor="w", pady=(0, 6))
+
+        self.canvas = tk.Canvas(self.frame, bg="white", highlightthickness=1, highlightbackground="#cccccc")
+        self.canvas.pack(fill="both", expand=True)
+
+        self.status = tk.Label(self.frame, text="", anchor="w", justify="left", wraplength=520)
+        self.status.pack(fill="x", pady=(6, 0))
+
+        self.original_image = Image.open(self.config.image_path)
+        self.original_width, self.original_height = self.original_image.size
+        self.display_image, self.scale = self._build_display_image(
+            self.original_image,
+            self.config.max_display_size
+        )
+        self.display_width, self.display_height = self.display_image.size
+        self.tk_image = ImageTk.PhotoImage(self.display_image)
+
+        self.canvas.config(width=self.display_width, height=self.display_height)
+        self.canvas.create_image(0, 0, anchor="nw", image=self.tk_image, tags="base")
+
+        self.geo = AffineGeoReference(self.config.control_points) if self.config.control_points else None
+        self.draw_control_points()
+
+        if self.geo is None:
+            self.status.config(
+                text="Imagen cargada, pero sin georreferenciación.",
+                fg="#9a5f00",
+            )
+        else:
+            self.status.config(text=f"Mapa georreferenciado listo: {self.config.name}.", fg="green")
+
+    def _build_display_image(self, pil_image, max_size):
+        max_w, max_h = max_size
+        w, h = pil_image.size
+        scale = min(max_w / w, max_h / h, 1.0)
+        new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+        if scale < 1.0:
+            pil_image = pil_image.resize(new_size, Image.Resampling.LANCZOS)
+        return pil_image, scale
+
+    def draw_control_points(self):
+        self.canvas.delete("control")
+        if not self.config.control_points:
+            return
+
+        for point in self.config.control_points:
+            x = point["pixel"][0] * self.scale
+            y = point["pixel"][1] * self.scale
+            r = 4
+            self.canvas.create_oval(
+                x - r, y - r, x + r, y + r,
+                fill=self.config.marker_color,
+                outline="white",
+                width=2,
+                tags="control",
+            )
+            self.canvas.create_text(
+                x + 18, y - 12,
+                text=point["name"],
+                fill=self.config.marker_color,
+                font=("Arial", 10, "bold"),
+                tags="control",
+            )
+
+    def draw_position(self, easting, northing):
+        if self.geo is None:
+            return None
+
+        x_raw, y_raw = self.geo.utm_to_pixel(easting, northing)
+        inside = 0 <= x_raw < self.original_width and 0 <= y_raw < self.original_height
+
+        self.canvas.delete("gps")
+        self.canvas.delete("trail")
+
+        if inside:
+            self.trail_pixels.append((x_raw, y_raw))
+            if len(self.trail_pixels) > MAX_TRAIL_POINTS:
+                self.trail_pixels.pop(0)
+
+            if len(self.trail_pixels) >= 2:
+                flat_points = []
+                for px, py in self.trail_pixels:
+                    flat_points.extend([px * self.scale, py * self.scale])
+                self.canvas.create_line(*flat_points, fill="red", width=2, tags="trail")
+
+            x = x_raw * self.scale
+            y = y_raw * self.scale
+            r = 6
+            self.canvas.create_oval(
+                x - r, y - r, x + r, y + r,
+                fill="blue",
+                outline="white",
+                width=2,
+                tags="gps",
+            )
+            self.canvas.create_text(
+                x,
+                y - 14,
+                text="GPS",
+                fill="blue",
+                font=("Arial", 10, "bold"),
+                tags="gps",
+            )
+            self.status.config(text=f"Posición representada correctamente en {self.config.name}.", fg="green")
+        else:
+            self.status.config(text=f"La posición GPS cae fuera de la imagen {self.config.name}.", fg="red")
+
+        return x_raw, y_raw, inside
 
 
 # =========================================================
@@ -276,30 +397,45 @@ class GPSMapApp:
         self.data_queue = data_queue
         self.stop_event = stop_event
 
-        self.root.title("Práctica 2 - Navegación GPS sobre mapa georreferenciado")
-
-        self.geo = AffineGeoReference(CONTROL_POINTS)
+        self.root.title(WINDOW_TITLE)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.main_frame = tk.Frame(root)
         self.main_frame.pack(fill="both", expand=True)
 
-        self.canvas = tk.Canvas(
-            self.main_frame,
-            width=WINDOW_WIDTH,
-            height=WINDOW_HEIGHT,
-            bg="white"
-        )
-        self.canvas.pack(side="left", fill="both", expand=True)
+        self.maps_frame = tk.Frame(self.main_frame)
+        self.maps_frame.pack(side="left", fill="both", expand=True)
 
-        self.info_frame = tk.Frame(self.main_frame, padx=10, pady=10)
+        self.campus_panel = MapPanel(
+            self.maps_frame,
+            MapConfig(
+                name="Campus Sur",
+                image_path=CAMPUS_MAP_IMAGE_PATH,
+                control_points=CAMPUS_CONTROL_POINTS,
+                max_display_size=(820, 720),
+                marker_color="#0d4f8b",
+            ),
+            title_text="Campus Sur (mapa georreferenciado)",
+        )
+
+        self.insia_panel = MapPanel(
+            self.maps_frame,
+            MapConfig(
+                name="INSIA",
+                image_path=INSIA_IMAGE_PATH,
+                control_points=INSIA_CONTROL_POINTS,
+                max_display_size=(520, 380),
+                marker_color="#0d4f8b",
+            ),
+            title_text="INSIA (mapa georreferenciado)",
+        )
+
+        self.info_frame = tk.Frame(self.main_frame, padx=12, pady=12, width=330)
         self.info_frame.pack(side="right", fill="y")
+        self.info_frame.pack_propagate(False)
 
-        self.info_title = tk.Label(
-            self.info_frame,
-            text="Datos GPS",
-            font=("Arial", 16, "bold")
-        )
-        self.info_title.pack(pady=(0, 10))
+        self.info_title = tk.Label(self.info_frame, text="Datos GPS", font=("Arial", 16, "bold"))
+        self.info_title.pack(pady=(0, 12))
 
         self.lbl_fix = tk.Label(self.info_frame, text="Fix: --", anchor="w", justify="left")
         self.lbl_fix.pack(fill="x")
@@ -310,119 +446,91 @@ class GPSMapApp:
         self.lbl_alt = tk.Label(self.info_frame, text="Altitud: --", anchor="w", justify="left")
         self.lbl_alt.pack(fill="x")
 
-        self.lbl_latlon = tk.Label(self.info_frame, text="Lat/Lon: --", anchor="w", justify="left")
+        self.lbl_latlon = tk.Label(self.info_frame, text="Lat/Lon: --", anchor="w", justify="left", wraplength=300)
         self.lbl_latlon.pack(fill="x", pady=(10, 0))
 
-        self.lbl_utm = tk.Label(self.info_frame, text="UTM: --", anchor="w", justify="left")
+        self.lbl_utm = tk.Label(self.info_frame, text="UTM: --", anchor="w", justify="left", wraplength=300)
         self.lbl_utm.pack(fill="x")
 
-        self.lbl_pixel = tk.Label(self.info_frame, text="Pixel: --", anchor="w", justify="left")
-        self.lbl_pixel.pack(fill="x", pady=(10, 0))
+        self.lbl_pixel_campus = tk.Label(self.info_frame, text="Pixel Campus: --", anchor="w", justify="left")
+        self.lbl_pixel_campus.pack(fill="x", pady=(10, 0))
+
+        self.lbl_pixel_insia = tk.Label(self.info_frame, text="Pixel INSIA: --", anchor="w", justify="left", wraplength=300)
+        self.lbl_pixel_insia.pack(fill="x")
 
         self.lbl_status = tk.Label(
             self.info_frame,
             text="Estado: esperando datos...",
             fg="blue",
             anchor="w",
-            justify="left"
+            justify="left",
+            wraplength=300,
         )
-        self.lbl_status.pack(fill="x", pady=(20, 0))
+        self.lbl_status.pack(fill="x", pady=(18, 0))
 
-        self.load_map_image()
+        self.lbl_notes = tk.Label(
+            self.info_frame,
+            text=(
+                "Configuración actual:\n"
+                "• Campus Sur está georreferenciado.\n"
+                "• INSIA está georreferenciado con sus propios puntos.\n"
+            ),
+            anchor="w",
+            justify="left",
+            wraplength=300,
+            fg="#444444",
+        )
+        self.lbl_notes.pack(fill="x", pady=(18, 0))
 
-        self.trail_pixels = []
-        self.current_marker = None
-
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.update_loop()
 
-    def load_map_image(self):
-        try:
-            self.map_image_pil = Image.open(MAP_IMAGE_PATH)
-        except Exception as e:
-            raise FileNotFoundError(
-                f"No se pudo abrir la imagen '{MAP_IMAGE_PATH}'. Error: {e}"
-            )
-
-        self.img_width, self.img_height = self.map_image_pil.size
-        self.map_image_tk = ImageTk.PhotoImage(self.map_image_pil)
-
-        self.canvas.config(width=self.img_width, height=self.img_height)
-        self.canvas.create_image(0, 0, anchor="nw", image=self.map_image_tk)
-
-    def draw_trail(self):
-        self.canvas.delete("trail")
-
-        if len(self.trail_pixels) < 2:
-            return
-
-        flat_points = []
-        for x, y in self.trail_pixels:
-            flat_points.extend([x, y])
-
-        self.canvas.create_line(
-            *flat_points,
-            fill="red",
-            width=2,
-            tags="trail"
-        )
-
-    def draw_current_position(self, x, y):
-        self.canvas.delete("gps_point")
-
-        r = 6
-        self.canvas.create_oval(
-            x - r, y - r, x + r, y + r,
-            fill="blue",
-            outline="white",
-            width=2,
-            tags="gps_point"
-        )
-
-        self.canvas.create_text(
-            x,
-            y - 15,
-            text="GPS",
-            fill="blue",
-            font=("Arial", 10, "bold"),
-            tags="gps_point"
-        )
-
-    def update_info(self, lat, lon, fix_q, sats, alt, E, N, zone, hemi, x, y):
+    def update_info(self, lat, lon, fix_q, sats, alt, easting, northing, zone, hemi, campus_result, insia_result):
         self.lbl_fix.config(text=f"Fix: {fix_q}")
         self.lbl_sats.config(text=f"Satélites: {sats}")
         self.lbl_alt.config(text=f"Altitud: {alt:.2f} m")
         self.lbl_latlon.config(text=f"Lat/Lon: {lat:.8f}, {lon:.8f}")
-        self.lbl_utm.config(text=f"UTM: E={E:.3f}  N={N:.3f}  Zona={zone}{hemi}")
-        self.lbl_pixel.config(text=f"Pixel: x={x:.1f}, y={y:.1f}")
+        self.lbl_utm.config(text=f"UTM: E={easting:.3f}  N={northing:.3f}  Zona={zone}{hemi}")
+
+        if campus_result is None:
+            self.lbl_pixel_campus.config(text="Pixel Campus: --")
+        else:
+            x, y, inside = campus_result
+            suffix = "(dentro)" if inside else "(fuera)"
+            self.lbl_pixel_campus.config(text=f"Pixel Campus: x={x:.1f}, y={y:.1f} {suffix}")
+
+        if insia_result is None:
+            self.lbl_pixel_insia.config(text="Pixel INSIA: --")
+        else:
+            x, y, inside = insia_result
+            suffix = "(dentro)" if inside else "(fuera)"
+            self.lbl_pixel_insia.config(text=f"Pixel INSIA: x={x:.1f}, y={y:.1f} {suffix}")
 
     def update_loop(self):
         try:
             while True:
                 lat, lon, fix_q, sats, alt = self.data_queue.get_nowait()
 
-                E, N, zone, hemi = latlon_to_utm_wgs84(lat, lon, force_zone=None)
-                x, y = self.geo.utm_to_pixel(E, N)
-
-                self.update_info(lat, lon, fix_q, sats, alt, E, N, zone, hemi, x, y)
-
-                if 0 <= x < self.img_width and 0 <= y < self.img_height:
+                if fix_q <= 0:
                     self.lbl_status.config(
-                        text="Estado: posición representada en el mapa",
-                        fg="green"
+                        text="Estado: trama recibida, pero sin posicionamiento válido.",
+                        fg="#c27d00",
                     )
+                    continue
 
-                    self.trail_pixels.append((x, y))
-                    if len(self.trail_pixels) > MAX_TRAIL_POINTS:
-                        self.trail_pixels.pop(0)
+                easting, northing, zone, hemi = latlon_to_utm_wgs84(lat, lon, force_zone=30)
 
-                    self.draw_trail()
-                    self.draw_current_position(x, y)
-                else:
-                    self.lbl_status.config(
-                        text="Estado: posición fuera de la imagen georreferenciada",
-                        fg="red"
-                    )
+                campus_result = self.campus_panel.draw_position(easting, northing)
+                insia_result = self.insia_panel.draw_position(easting, northing)
+
+                self.update_info(
+                    lat, lon, fix_q, sats, alt, easting, northing, zone, hemi,
+                    campus_result, insia_result,
+                )
+
+                self.lbl_status.config(
+                    text="Estado: posición actualizada en todos los mapas georreferenciados.",
+                    fg="green",
+                )
         except queue.Empty:
             pass
 
@@ -433,19 +541,64 @@ class GPSMapApp:
         self.root.destroy()
 
 
+# =========================================================
+# PRUEBAS
+# =========================================================
+def test_control_points():
+    campus_geo = AffineGeoReference(CAMPUS_CONTROL_POINTS)
+    insia_geo = AffineGeoReference(INSIA_CONTROL_POINTS)
+
+    print("=== TEST CAMPUS ===")
+    for p in CAMPUS_CONTROL_POINTS:
+        x, y = campus_geo.utm_to_pixel(*p["utm"])
+        print(p["name"], "esperado:", p["pixel"], "calculado:", (round(x, 2), round(y, 2)))
+
+    print("\n=== TEST INSIA ===")
+    for p in INSIA_CONTROL_POINTS:
+        x, y = insia_geo.utm_to_pixel(*p["utm"])
+        print(p["name"], "esperado:", p["pixel"], "calculado:", (round(x, 2), round(y, 2)))
+
+
+def fake_gps_sender(data_queue, stop_event):
+    test_points = [
+        (40.386625, -3.632161),  # cerca de P1
+        (40.390619, -3.629153),  # cerca de P2
+        (40.390128, -3.625111),  # cerca de P3
+    ]
+
+    i = 0
+    while not stop_event.is_set():
+        lat, lon = test_points[i % len(test_points)]
+        data_queue.put((lat, lon, 1, 8, 650.0))
+        i += 1
+        time.sleep(1)
+
+
+# =========================================================
+# PROGRAMA PRINCIPAL
+# =========================================================
 def main():
+    USE_FAKE_GPS = False
     data_queue = queue.Queue()
     stop_event = threading.Event()
 
-    gps_thread = threading.Thread(
-        target=gps_reader,
-        args=(PORT, data_queue, stop_event),
-        daemon=True
-    )
+    if USE_FAKE_GPS:
+        gps_thread = threading.Thread(
+            target=fake_gps_sender,
+            args=(data_queue, stop_event),
+            daemon=True,
+        )
+    else:
+        gps_thread = threading.Thread(
+            target=gps_reader,
+            args=(PORT, data_queue, stop_event),
+            daemon=True,
+        )
+
     gps_thread.start()
 
     root = tk.Tk()
-    app = GPSMapApp(root, data_queue, stop_event)
+    GPSMapApp(root, data_queue, stop_event)
 
     try:
         root.mainloop()
@@ -455,4 +608,5 @@ def main():
 
 
 if __name__ == "__main__":
+    # test_control_points()
     main()
