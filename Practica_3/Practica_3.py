@@ -26,7 +26,7 @@ MAP_CANVAS_SIZE = (620, 620)
 MAX_TRAIL_POINTS = 400
 
 # Si quieres probar sin GPS real, ponlo a True.
-USE_FAKE_GPS = True
+USE_FAKE_GPS = False
 
 # Distancia máxima para considerar que el coche está en la pista
 MAX_DISTANCE_TO_TRACK_M = 25.0
